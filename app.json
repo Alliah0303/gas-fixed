@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "GaSecure",
+    "slug": "myapp",
+    "owner": "alli03",
+    "scheme": "myapp",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "icon": "./assets/images/icon.png",
+    "splash": {
+      "image": "./assets/images/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": ["**/*"],
+    "android": {
+      "package": "com.alli03.myapp",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      }
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.alli03.myapp"
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/icon.png"
+    },
+    "plugins": [
+      "expo-router",
+      ["expo-build-properties", { "android": { "newArchEnabled": true } }]
+    ],
+    "experiments": { "typedRoutes": true },
+    "extra": {
+      "router": {},
+      "eas": { "projectId": "079f1c59-1a75-4980-af4f-901afe963ad1" }
+    }
+  }
+}

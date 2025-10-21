@@ -1,0 +1,35 @@
+{
+  "rules": {
+    
+    ".read": true,
+    ".write": true,
+    
+    
+    "readings": {
+      ".indexOn": ["ts", "timestamp", "date"],
+      ".validate": "newData.hasChildren(['ts', 'gas1', 'gas2', 'gas3'])"
+    },
+    
+  
+    "gas1": {
+      ".validate": "newData.isNumber() && newData.val() >= 0"
+    },
+    "gas2": {
+      ".validate": "newData.isNumber() && newData.val() >= 0"
+    },
+    "gas3": {
+      ".validate": "newData.isNumber() && newData.val() >= 0"
+    },
+    
+ 
+    "status": {
+      ".indexOn": ["alarmOn", "timestamp"]
+    },
+    "commands": {
+      ".indexOn": ["timestamp", "executed"]
+    },
+    "maxGas": {
+      ".validate": "newData.isNumber() && newData.val() >= 0"
+    }
+  }
+}
