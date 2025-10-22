@@ -32,7 +32,14 @@
     },
     "plugins": [
       "expo-router",
-      ["expo-build-properties", { "android": { "newArchEnabled": true } }]
+      ["expo-build-properties", { "android": { "newArchEnabled": true } }],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icon.png",
+          "color": "#ffffff"
+        }
+      ]
     ],
     "experiments": { "typedRoutes": true },
     "extra": {

@@ -1,209 +1,96 @@
 // app/(tabs)/log.tsx
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState } from "react";
 import {
   StyleSheet,
   FlatList,
   View as RNView,
   ActivityIndicator,
   ListRenderItem,
-  Pressable,
-  Alert,
+  Pressable,            // ⬅️ added
+  Alert,                // ⬅️ added
 } from "react-native";
 import { useBottomTabBarHeight } from "@react-navigation/bottom-tabs";
-import { useRouter } from "expo-router";
 import { View, Text } from "@/components/Themed";
-import { getReadings } from "@/lib/serverApi";
-import { addToArchive } from "@/lib/archiveStore";
-import { getStoredLogs, removeLogEntry, alwaysAddEntry, LogEntry } from "@/lib/logStore";
+import { db } from "../../firebaseConfig";
+import {
+  ref,
+  query as fbQuery,
+  orderByKey,
+  limitToLast,
+  onChildAdded,
+  off,
+  update,
+  type DataSnapshot,    // ⬅️ type-only import
+} from "firebase/database";
 
-type Row = LogEntry;
-const THRESHOLD = 300;
+type Row = {
+  id: string;
+  timestamp: string; // "YYYY-MM-DDTHH:mm:ss"
+  value: number;     // gas value when threshold was exceeded
+};
+
+const MAX_ITEMS = 100;
 
 export default function LogScreen() {
-  const router = useRouter();
   const tabBarH = useBottomTabBarHeight();
   const [rows, setRows] = useState<Row[]>([]);
   const [initialLoading, setInitialLoading] = useState(true);
-  const [lastGasValues, setLastGasValues] = useState({ gas1: 0, gas2: 0, gas3: 0 });
 
-  const load = useCallback(async () => {
+  useEffect(() => {
+    const alarmsRef = ref(db, "/alarms");
+    const q = fbQuery(alarmsRef, orderByKey(), limitToLast(MAX_ITEMS));
+
+    const buffer: Row[] = [];
+    const seen = new Set<string>();
     setInitialLoading(true);
-    console.log("🔄 Loading persistent logs...");
-    
-    try {
-      // Load stored logs first
-      const storedLogs = await getStoredLogs();
-      console.log("📚 Loaded stored logs:", storedLogs.length, "items");
-      
-      // Filter to show ONLY high gas entries (red background entries)
-      const highGasLogs = storedLogs.filter(log => log.max >= THRESHOLD);
-      console.log("🚨 High gas logs only:", highGasLogs.length, "items");
-      setRows(highGasLogs);
-      
-      // Get current Firebase data
-      const firebaseData = await getReadings(1); // Just get latest reading
-      console.log("🔥 Firebase data:", firebaseData);
-      
-      if (firebaseData.length > 0) {
-        const currentReading = firebaseData[0];
-        const currentGasValues = {
-          gas1: currentReading.gas1,
-          gas2: currentReading.gas2,
-          gas3: currentReading.gas3
-        };
-        
-        console.log("🔍 Current Firebase values:", currentGasValues);
-        console.log("🔍 Last known values:", lastGasValues);
-        
-        // Only add entry if it's a high gas level (above threshold)
-        const maxGas = Math.max(currentGasValues.gas1, currentGasValues.gas2, currentGasValues.gas3);
-        const isHighGas = maxGas >= THRESHOLD;
-        
-        console.log("🔍 Max gas level:", maxGas, "Threshold:", THRESHOLD, "Is high gas:", isHighGas);
-        
-        if (isHighGas) {
-          // Check if we already have a very recent high gas entry (within last 30 seconds)
-          const hasVeryRecentEntry = storedLogs.some(log => {
-            const logTime = log.timestamp;
-            const timeDiff = Date.now() - logTime;
-            return timeDiff < (30 * 1000) && log.max >= THRESHOLD; // Within 30 seconds and high gas
-          });
-          
-          console.log("🔍 Has very recent high gas entry (within 30s):", hasVeryRecentEntry);
-          
-          if (!hasVeryRecentEntry) {
-            console.log("🚨 HIGH GAS DETECTED: Adding new high gas log entry...");
-            await alwaysAddEntry({
-              id: String(Date.now()),
-              date: currentReading.date,
-              time: currentReading.time,
-              value: currentReading.value,
-              gas1: currentReading.gas1,
-              gas2: currentReading.gas2,
-              gas3: currentReading.gas3,
-              max: currentReading.max,
-            });
-            
-            // Reload and filter to show only high gas entries
-            const updatedLogs = await getStoredLogs();
-            const updatedHighGasLogs = updatedLogs.filter(log => log.max >= THRESHOLD);
-            setRows(updatedHighGasLogs);
-            console.log("✅ HIGH GAS: New high gas entry added, total high gas logs:", updatedHighGasLogs.length);
-          } else {
-            console.log("⏸️ Very recent high gas entry exists (within 30s), skipping to prevent spam");
-          }
-        } else {
-          console.log("⏸️ Gas levels normal, no high gas detected - no entry added");
-        }
-        
-        setLastGasValues(currentGasValues);
-      }
-    } catch (error) {
-      console.error("❌ Error loading logs:", error);
-    }
-    
-    setInitialLoading(false);
+
+    const handle = (snap: DataSnapshot) => {
+      const id = snap.key ?? "";
+      if (!id || seen.has(id)) return;
+
+      const v = snap.val() as { timestamp?: string; value?: number } | null;
+      seen.add(id);
+      buffer.push({
+        id,
+        timestamp: String(v?.timestamp ?? ""),
+        value: Number(v?.value ?? 0),
+      });
+
+      // newest first by key (epoch-based keys sort nicely)
+      buffer.sort((a, b) => (a.id > b.id ? -1 : 1));
+      setRows([...buffer]);
+      setInitialLoading(false);
+    };
+
+    // Fires for existing items (old→new), then future inserts.
+    onChildAdded(q, handle, (err) => {
+      console.error("onChildAdded error:", err);
+      setInitialLoading(false);
+    });
+
+    return () => {
+      // detach using the SAME query used to attach
+      off(q, "child_added", handle as any);
+    };
   }, []);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  // Move to /archives/{id} and delete /alarms/{id}
+  const archiveItem = async (item: Row) => {
+    const root = ref(db);
+    const updates: Record<string, any> = {};
+    updates[`/archives/${item.id}`] = { timestamp: item.timestamp, value: item.value };
+    updates[`/alarms/${item.id}`] = null; // delete
+    await update(root, updates);
+    setRows((prev) => prev.filter((r) => r.id !== item.id));
+  };
 
-  // Poll for high gas levels every 3 seconds (continuous detection)
-  useEffect(() => {
-    const pollInterval = setInterval(async () => {
-      try {
-        console.log("🔄 CONTINUOUS DETECTION: Checking Firebase for high gas levels...");
-        
-        const firebaseData = await getReadings(1);
-        if (firebaseData.length > 0) {
-          const currentReading = firebaseData[0];
-          const currentGasValues = {
-            gas1: currentReading.gas1,
-            gas2: currentReading.gas2,
-            gas3: currentReading.gas3
-          };
-          
-          console.log("🔍 Current Firebase values:", currentGasValues);
-          console.log("🔍 Last known values:", lastGasValues);
-          
-          // HIGH GAS DETECTION: Add entry if gas levels are HIGH (above threshold)
-          const maxGas = Math.max(currentGasValues.gas1, currentGasValues.gas2, currentGasValues.gas3);
-          const isHighGas = maxGas >= THRESHOLD;
-          
-          console.log("🔍 Max gas level:", maxGas, "Threshold:", THRESHOLD, "Is high gas:", isHighGas);
-          
-          if (isHighGas) {
-            // Check if this is a new high gas detection (different from last known values)
-            const hasChanged = 
-              currentGasValues.gas1 !== lastGasValues.gas1 ||
-              currentGasValues.gas2 !== lastGasValues.gas2 ||
-              currentGasValues.gas3 !== lastGasValues.gas3;
-            
-            console.log("🔍 Gas values changed:", hasChanged);
-            
-            if (hasChanged || lastGasValues.gas1 === 0) { // First detection or values changed
-              console.log("🚨 NEW HIGH GAS DETECTED: Adding new log entry...");
-              await alwaysAddEntry({
-                id: String(Date.now()),
-                date: currentReading.date,
-                time: currentReading.time,
-                value: currentReading.value,
-                gas1: currentReading.gas1,
-                gas2: currentReading.gas2,
-                gas3: currentReading.gas3,
-                max: currentReading.max,
-              });
-              
-              // Update the display - filter to show only high gas entries
-              const updatedLogs = await getStoredLogs();
-              const updatedHighGasLogs = updatedLogs.filter(log => log.max >= THRESHOLD);
-              setRows(updatedHighGasLogs);
-              setLastGasValues(currentGasValues);
-              console.log("✅ NEW HIGH GAS: Entry added, total high gas logs:", updatedHighGasLogs.length);
-            } else {
-              console.log("⏸️ Same high gas values, no new detection");
-            }
-          } else {
-            console.log("⏸️ Gas levels normal, no high gas detected");
-            // Update last known values even for normal levels
-            setLastGasValues(currentGasValues);
-          }
-        }
-      } catch (error) {
-        console.error("❌ Error in continuous detection polling:", error);
-      }
-    }, 3000); // Poll every 3 seconds (faster detection)
-
-    return () => clearInterval(pollInterval);
-  }, [lastGasValues]);
-
-
-  const onLongPressRow = (item: Row) => {
+  const confirmArchive = (item: Row) => {
     Alert.alert(
-      "Choose action",
-      `${item.date} • ${item.time}\nGas1: ${item.gas1}\nGas2: ${item.gas2}\nGas3: ${item.gas3}\nMax: ${item.max}`,
+      "Archive entry?",
+      `Timestamp: ${item.timestamp}\nValue: ${item.value}\n\nMove this entry to Archive?`,
       [
-        {
-          text: "Archive",
-          onPress: async () => {
-            addToArchive(item);
-            await removeLogEntry(item.id);
-            const updatedLogs = await getStoredLogs();
-            setRows(updatedLogs);
-            router.push("/(tabs)/archive");
-          },
-        },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            await removeLogEntry(item.id);
-            const updatedLogs = await getStoredLogs();
-            setRows(updatedLogs);
-          },
-        },
         { text: "Cancel", style: "cancel" },
+        { text: "Archive", onPress: () => archiveItem(item) },
       ],
       { cancelable: true }
     );
@@ -211,8 +98,10 @@ export default function LogScreen() {
 
   const Header = () => (
     <RNView style={styles.header}>
-      <Text style={styles.title}>High Gas Alerts</Text>
-      <Text style={styles.subtitle}>Continuous detection of high gas levels</Text>
+      <Text style={styles.title}>Alarm Logs</Text>
+      <Text style={styles.subtitle}>
+        Showing latest {Math.min(rows.length, MAX_ITEMS)} entr{rows.length === 1 ? "y" : "ies"}
+      </Text>
     </RNView>
   );
 
@@ -220,40 +109,24 @@ export default function LogScreen() {
     <RNView style={styles.empty}>
       <ActivityIndicator />
       <Text style={styles.emptyTitle}>{message}</Text>
-      <Text style={styles.emptySub}>No high gas alerts yet. Only dangerous gas levels will appear here.</Text>
+      <Text style={styles.emptySub}>
+        Entries appear here whenever the device pushes to <Text style={styles.bold}>/alarms</Text>.
+      </Text>
     </RNView>
   );
 
   const Item: ListRenderItem<Row> = ({ item }) => (
-    <Pressable onLongPress={() => onLongPressRow(item)} delayLongPress={450}>
-      <View style={[styles.card, item.max >= THRESHOLD && styles.cardHigh]}>
+    <Pressable onLongPress={() => confirmArchive(item)} delayLongPress={450}>
+      <View style={[styles.card, styles.cardHigh]}>
         <Text style={styles.cardText}>
-          <Text style={styles.bold}>Date: </Text>
-          {item.date}
-        </Text>
-        <Text style={styles.cardText}>
-          <Text style={styles.bold}>Time: </Text>
-          {item.time}
+          <Text style={styles.bold}>Timestamp: </Text>
+          {item.timestamp || "—"}
         </Text>
         <Text style={styles.cardText}>
-          <Text style={styles.bold}>Reading: </Text>
+          <Text style={styles.bold}>Value: </Text>
+          {item.value}
         </Text>
-        <Text style={styles.gasReading}>
-          <Text style={styles.bold}>     Gas Sensor 1: </Text>
-          {item.gas1}
-        </Text>
-        <Text style={styles.gasReading}>
-          <Text style={styles.bold}>     Gas Sensor 2: </Text>
-          {item.gas2}
-        </Text>
-        <Text style={styles.gasReading}>
-          <Text style={styles.bold}>     Gas Sensor 3: </Text>
-          {item.gas3}
-        </Text>
-        <Text style={styles.gasReading}>
-          <Text style={styles.bold}>     Max Gas Detected: </Text>
-          {item.max}
-        </Text>
+        <Text style={styles.badge}>THRESHOLD EXCEEDED</Text>
       </View>
     </Pressable>
   );
@@ -261,7 +134,7 @@ export default function LogScreen() {
   if (initialLoading) {
     return (
       <View style={{ flex: 1 }}>
-        <EmptyBody message="Loading logs…" />
+        <EmptyBody message="Connecting to /alarms…" />
       </View>
     );
   }
@@ -274,7 +147,7 @@ export default function LogScreen() {
           keyExtractor={(_, i) => `empty-${i}`}
           renderItem={() => null}
           ListHeaderComponent={Header}
-          ListEmptyComponent={<EmptyBody message="No logs yet" />}
+          ListEmptyComponent={<EmptyBody message="No alarm logs yet" />}
           contentContainerStyle={[styles.listContent, { paddingBottom: tabBarH + 24 }]}
         />
       </View>
@@ -295,22 +168,10 @@ export default function LogScreen() {
 }
 
 const styles = StyleSheet.create({
-  header: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 6 },
+  header: { paddingHorizontal: 16, paddingTop: 20, paddingBottom: 6 },
   title: { fontSize: 18, fontWeight: "700" },
   subtitle: { opacity: 0.6 },
-  testButton: {
-    backgroundColor: "rgba(64,148,255,0.20)",
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
-    marginTop: 8,
-    alignSelf: "flex-start",
-  },
-  testButtonText: {
-    color: "#4094ff",
-    fontSize: 14,
-    fontWeight: "600",
-  },
+
   listContent: { paddingHorizontal: 16, paddingBottom: 24 },
 
   empty: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: 24, gap: 10 },
@@ -318,7 +179,7 @@ const styles = StyleSheet.create({
   emptySub: { textAlign: "center", opacity: 0.7, marginBottom: 8 },
 
   card: {
-    height: 160,
+    minHeight: 90,
     borderRadius: 12,
     backgroundColor: "rgba(64,148,255,0.20)",
     padding: 12,
@@ -326,6 +187,15 @@ const styles = StyleSheet.create({
   },
   cardHigh: { backgroundColor: "rgba(215, 38, 56, 0.12)" },
   cardText: { fontSize: 14 },
-  gasReading: { fontSize: 14, marginLeft: 8 },
   bold: { fontWeight: "700" },
+  badge: {
+    alignSelf: "flex-start",
+    marginTop: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    fontSize: 12,
+    overflow: "hidden",
+    backgroundColor: "rgba(215, 38, 56, 0.2)",
+  },
 });
