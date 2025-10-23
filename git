@@ -1,0 +1,3 @@
+     UID     PID    PPID  TTY        STIME COMMAND
+    Acer     202       1 cons0    18:37:11 /usr/bin/bash
+    Acer     324     202 cons0    18:37:49 /usr/bin/PS
